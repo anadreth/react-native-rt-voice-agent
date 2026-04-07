@@ -92,14 +92,37 @@ export class MessageRouter {
         this.handleAssistantDone();
         break;
 
-      case 'tool_call':
-        await this.handleToolCall(msg.name!, msg.args!, msg.callId!);
+      case 'tool_call': {
+        if (!msg.name || !msg.callId) {
+          this.logger.error('Malformed tool_call: missing name or callId', msg);
+          return;
+        }
+        await this.handleToolCall(msg.name, msg.args ?? {}, msg.callId);
+        break;
+      }
+
+      case 'provider_error':
+        this.callbacks.emit({
+          type: 'error',
+          error: new Error(`Provider error [${msg.errorCode}]: ${msg.errorMessage}`),
+          fatal: false,
+        });
+        break;
+
+      case 'session_created':
+        // Informational — emitted as raw event already
         break;
     }
   }
 
   private handleSpeechStarted(): void {
-    const { message } = this.conversationManager.getOrCreateEphemeralUserId();
+    // Finalize any in-progress assistant message (user is interrupting)
+    const interruptedId = this.conversationManager.finalizeAssistantMessage();
+    if (interruptedId) {
+      this.logger.info('User interrupted assistant — finalizing message');
+    }
+
+    this.conversationManager.getOrCreateEphemeralUserId();
 
     this.callbacks.emit({ type: 'user.speech.started' });
 
@@ -172,13 +195,22 @@ export class MessageRouter {
 
   private handleAssistantDone(): void {
     const messageId = this.conversationManager.finalizeAssistantMessage();
+
+    if (!messageId) {
+      // No assistant message to finalize — don't leak user text
+      this.logger.warn('assistant.done received but no assistant message to finalize');
+      this.callbacks.emit({ type: 'assistant.done', text: '', messageId: '' });
+      this.emitConversationUpdate();
+      return;
+    }
+
     const messages = this.conversationManager.getMessages();
     const last = messages[messages.length - 1];
 
     this.callbacks.emit({
       type: 'assistant.done',
-      text: last?.text ?? '',
-      messageId: messageId ?? '',
+      text: last?.role === 'assistant' ? last.text : '',
+      messageId,
     });
     this.emitConversationUpdate();
   }

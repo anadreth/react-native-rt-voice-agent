@@ -10,6 +10,14 @@ export type { UseRealtimeVoiceReturn } from './react/use-realtime-voice';
 // ─── Providers ────────────────────────────────────────────────────
 export { openAIProvider } from './providers/openai/openai-provider';
 export type { OpenAIProviderConfig } from './providers/openai/openai-provider';
+export { localPipelineProvider } from './providers/local-pipeline/local-pipeline-provider';
+export type { LocalPipelineProviderConfig } from './providers/local-pipeline/local-pipeline-provider';
+
+// ─── Transports ──────────────────────────────────────────────────
+export { WebRTCTransport } from './transports/webrtc-transport';
+export type { WebRTCTransportConfig } from './transports/webrtc-transport';
+export { WebSocketTransport } from './transports/websocket-transport';
+export type { WebSocketTransportConfig } from './transports/websocket-transport';
 
 // ─── Types ────────────────────────────────────────────────────────
 export type {
@@ -19,6 +27,9 @@ export type {
   RealtimeSessionConfig,
   ToolDefinition,
   RealtimeProvider,
+  Transport,
+  TransportStartConfig,
+  TransportCallbacks,
   TokenRequestConfig,
   NormalizedMessage,
   LoggerInterface,

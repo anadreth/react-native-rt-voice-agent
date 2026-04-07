@@ -4,9 +4,12 @@ import type {
   TokenRequestConfig,
   NormalizedMessage,
   RTCIceServer,
+  LoggerInterface,
+  Transport,
 } from '../../core/types';
 import { AuthError, ProviderError } from '../../core/errors';
 import { mapOpenAIMessage } from './openai-message-map';
+import { WebRTCTransport } from '../../transports/webrtc-transport';
 
 export interface OpenAIProviderConfig {
   /** URL of your backend endpoint that returns an OpenAI ephemeral token */
@@ -19,9 +22,24 @@ export interface OpenAIProviderConfig {
   tokenExtractor?: (json: unknown) => string;
   /** Additional body fields to send with the token request */
   tokenBody?: Record<string, unknown>;
+  /** Timeout in ms for network requests. Default: 15000 */
+  timeout?: number;
 }
 
 const DEFAULT_MODEL = 'gpt-4o-realtime-preview';
+const DEFAULT_TIMEOUT = 15_000;
+
+function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() =>
+    clearTimeout(timer),
+  );
+}
 
 const DEFAULT_STUN_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -39,65 +57,79 @@ const DEFAULT_STUN_SERVERS: RTCIceServer[] = [
  */
 export function openAIProvider(config: OpenAIProviderConfig): RealtimeProvider {
   const model = config.model ?? DEFAULT_MODEL;
+  const timeout = config.timeout ?? DEFAULT_TIMEOUT;
 
   const extractToken = config.tokenExtractor ?? defaultTokenExtractor;
 
-  return {
-    async getToken(tokenConfig: TokenRequestConfig): Promise<string> {
-      const { voice, ...restTokenConfig } = tokenConfig;
-      const body = {
-        voice,
-        ...config.tokenBody,
-        ...restTokenConfig,
-      };
+  async function getToken(tokenConfig: TokenRequestConfig): Promise<string> {
+    const { voice, ...restTokenConfig } = tokenConfig;
+    const body = {
+      voice,
+      ...config.tokenBody,
+      ...restTokenConfig,
+    };
 
-      const res = await fetch(config.tokenUrl, {
+    const res = await fetchWithTimeout(
+      config.tokenUrl,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      });
+      },
+      timeout,
+    );
 
+    if (!res.ok) {
+      throw new AuthError(
+        `Token fetch failed: ${res.status} ${res.statusText}`,
+        config.tokenUrl,
+        res.status
+      );
+    }
+
+    const json = await res.json();
+    const token = extractToken(json);
+
+    if (!token) {
+      throw new AuthError(
+        'Invalid token response: could not extract token',
+        config.tokenUrl,
+        res.status
+      );
+    }
+
+    return token;
+  }
+
+  async function getIceServers(): Promise<RTCIceServer[]> {
+    if (!config.iceConfigUrl) {
+      return DEFAULT_STUN_SERVERS;
+    }
+
+    try {
+      const res = await fetchWithTimeout(config.iceConfigUrl, {}, timeout);
       if (!res.ok) {
-        throw new AuthError(
-          `Token fetch failed: ${res.status} ${res.statusText}`,
-          config.tokenUrl,
-          res.status
-        );
+        throw new ProviderError(`ICE config fetch failed: ${res.status}`);
       }
-
       const json = await res.json();
-      const token = extractToken(json);
+      return json.iceServers ?? DEFAULT_STUN_SERVERS;
+    } catch {
+      return DEFAULT_STUN_SERVERS;
+    }
+  }
 
-      if (!token) {
-        throw new AuthError(
-          'Invalid token response: could not extract token',
-          config.tokenUrl,
-          res.status
-        );
-      }
+  function getRealtimeEndpoint(voice: string): string {
+    return `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}&voice=${encodeURIComponent(voice)}`;
+  }
 
-      return token;
-    },
+  return {
+    transportType: 'webrtc',
 
-    async getIceServers(): Promise<RTCIceServer[]> {
-      if (!config.iceConfigUrl) {
-        return DEFAULT_STUN_SERVERS;
-      }
-
-      try {
-        const res = await fetch(config.iceConfigUrl);
-        if (!res.ok) {
-          throw new ProviderError(`ICE config fetch failed: ${res.status}`);
-        }
-        const json = await res.json();
-        return json.iceServers ?? DEFAULT_STUN_SERVERS;
-      } catch {
-        return DEFAULT_STUN_SERVERS;
-      }
-    },
-
-    getRealtimeEndpoint(voice: string): string {
-      return `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}&voice=${encodeURIComponent(voice)}`;
+    createTransport(logger?: LoggerInterface): Transport {
+      return new WebRTCTransport(
+        { getToken, getIceServers, getRealtimeEndpoint },
+        logger,
+      );
     },
 
     mapMessage(raw: unknown): NormalizedMessage | null {
@@ -115,9 +147,7 @@ export function openAIProvider(config: OpenAIProviderConfig): RealtimeProvider {
             model: sc?.transcriptionModel ?? 'gpt-4o-transcribe',
           },
           ...(sc?.maxResponseTokens != null && {
-            conversation: {
-              max_response_output_tokens: sc.maxResponseTokens,
-            },
+            max_response_output_tokens: sc.maxResponseTokens,
           }),
           ...(sessionConfig.tools && sessionConfig.tools.length > 0 && {
             tools: sessionConfig.tools.map((t) => ({
@@ -129,6 +159,24 @@ export function openAIProvider(config: OpenAIProviderConfig): RealtimeProvider {
           }),
         },
       };
+    },
+
+    buildUserTextMessages(text: string): unknown[] {
+      return [
+        {
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text }],
+          },
+        },
+        { type: 'response.create' },
+      ];
+    },
+
+    buildCancelMessage(): unknown {
+      return { type: 'response.cancel' };
     },
   };
 }

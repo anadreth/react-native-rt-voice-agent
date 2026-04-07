@@ -34,6 +34,7 @@ export type RealtimeEvent =
   | { type: 'tool.called'; name: string; args: Record<string, unknown>; callId: string }
   | { type: 'tool.result'; name: string; result: unknown; callId: string }
   | { type: 'conversation.updated'; messages: ConversationMessage[] }
+  | { type: 'volume.changed'; level: number }
   | { type: 'error'; error: Error; fatal: boolean }
   | { type: 'raw'; data: unknown };
 
@@ -62,24 +63,57 @@ export interface NormalizedMessage {
     | 'user_transcript_final'
     | 'assistant_delta'
     | 'assistant_done'
-    | 'tool_call';
+    | 'tool_call'
+    | 'provider_error'
+    | 'session_created';
   text?: string;
   name?: string;
   args?: Record<string, unknown>;
   callId?: string;
+  errorMessage?: string;
+  errorCode?: string;
 }
 
 export interface RealtimeProvider {
-  /** Fetch an ephemeral auth token */
-  getToken(config: TokenRequestConfig): Promise<string>;
-  /** Return ICE server configuration */
-  getIceServers(): Promise<RTCIceServer[]>;
-  /** Get the realtime SDP endpoint URL */
-  getRealtimeEndpoint(voice: string): string;
-  /** Map raw data channel message to a normalized event, or null to skip */
+  /** Transport type this provider uses */
+  readonly transportType: 'webrtc' | 'websocket';
+  /** Create the transport instance for this provider */
+  createTransport(logger?: LoggerInterface): Transport;
+  /** Map raw incoming message to a normalized event, or null to skip */
   mapMessage(raw: unknown): NormalizedMessage | null;
-  /** Build the session.update payload sent when data channel opens */
+  /** Build the session initialization payload sent when transport is ready */
   buildSessionUpdate(config: RealtimeSessionConfig): unknown;
+  /** Build provider-specific messages for sending user text. Returns array of messages to send in order. */
+  buildUserTextMessages?(text: string): unknown[];
+  /** Build provider-specific message for canceling a response */
+  buildCancelMessage?(): unknown;
+}
+
+// ─── Transport ───────────────────────────────────────────────────
+
+export interface Transport {
+  /** Start the transport: acquire audio, connect to remote */
+  start(config: TransportStartConfig): Promise<void>;
+  /** Send a JSON message to the remote side */
+  sendMessage(message: unknown): void;
+  /** Stop and clean up all resources */
+  stop(): void;
+  /** Whether the transport is ready to send/receive */
+  isReady(): boolean;
+}
+
+export interface TransportStartConfig {
+  sessionConfig: RealtimeSessionConfig;
+  callbacks: TransportCallbacks;
+}
+
+export interface TransportCallbacks {
+  onStateChange: (state: 'requesting_mic' | 'authenticating' | 'connecting' | 'connected') => void;
+  onMessage: (data: unknown) => void;
+  onReady: () => void;
+  onConnectionLost: () => void;
+  onVolume?: (level: number) => void;
+  onError: (error: Error, fatal: boolean) => void;
 }
 
 // ─── Configuration ────────────────────────────────────────────────
@@ -98,6 +132,14 @@ export interface RealtimeSessionConfig {
   audio?: {
     constraints?: Record<string, unknown>;
   };
+  /** Timeout in ms for network requests (token fetch, SDP exchange). Default: 15000 */
+  timeout?: number;
+  /** Max conversation messages to keep in memory. Oldest are pruned. Default: 200 */
+  maxMessages?: number;
+  /** Auto-reconnect on connection loss. Default: true */
+  autoReconnect?: boolean;
+  /** Max reconnection attempts. Default: 3 */
+  maxReconnectAttempts?: number;
   logger?: LoggerInterface;
 }
 

@@ -13,6 +13,8 @@ function generateId(): string {
   });
 }
 
+const DEFAULT_MAX_MESSAGES = 200;
+
 /**
  * Manages conversation messages and ephemeral user message tracking.
  * No storage — consumers persist via `conversation.updated` events.
@@ -20,6 +22,11 @@ function generateId(): string {
 export class ConversationManager {
   private messages: ConversationMessage[] = [];
   private ephemeralUserMessageId: string | null = null;
+  private maxMessages: number;
+
+  constructor(maxMessages?: number) {
+    this.maxMessages = maxMessages ?? DEFAULT_MAX_MESSAGES;
+  }
 
   getMessages(): ConversationMessage[] {
     return this.messages;
@@ -27,6 +34,11 @@ export class ConversationManager {
 
   setMessages(messages: ConversationMessage[]): void {
     this.messages = messages;
+  }
+
+  reset(): void {
+    this.messages = [];
+    this.ephemeralUserMessageId = null;
   }
 
   /**
@@ -51,6 +63,7 @@ export class ConversationManager {
     };
 
     this.messages = [...this.messages, message];
+    this.pruneIfNeeded();
     return { id, message };
   }
 
@@ -84,6 +97,7 @@ export class ConversationManager {
       status: 'final',
     };
     this.messages = [...this.messages, msg];
+    this.pruneIfNeeded();
     return msg;
   }
 
@@ -96,6 +110,7 @@ export class ConversationManager {
       isFinal: false,
     };
     this.messages = [...this.messages, msg];
+    this.pruneIfNeeded();
     return msg;
   }
 
@@ -106,8 +121,9 @@ export class ConversationManager {
   appendAssistantDelta(delta: string): string {
     const last = this.messages[this.messages.length - 1];
     if (last && last.role === 'assistant' && !last.isFinal) {
-      last.text += delta;
-      this.messages = [...this.messages]; // trigger new reference
+      // Immutable update — never mutate the existing message object
+      const updated = { ...last, text: last.text + delta };
+      this.messages = [...this.messages.slice(0, -1), updated];
       return last.id;
     }
     const msg = this.createAssistantMessage(delta);
@@ -120,10 +136,22 @@ export class ConversationManager {
   finalizeAssistantMessage(): string | null {
     const last = this.messages[this.messages.length - 1];
     if (last && last.role === 'assistant' && !last.isFinal) {
-      last.isFinal = true;
-      this.messages = [...this.messages]; // trigger new reference
+      // Immutable update — never mutate the existing message object
+      const updated = { ...last, isFinal: true };
+      this.messages = [...this.messages.slice(0, -1), updated];
       return last.id;
     }
     return null;
+  }
+
+  /**
+   * Prune oldest messages if over the limit.
+   * Never prunes the ephemeral message currently being spoken.
+   */
+  private pruneIfNeeded(): void {
+    if (this.messages.length <= this.maxMessages) return;
+
+    const excess = this.messages.length - this.maxMessages;
+    this.messages = this.messages.slice(excess);
   }
 }

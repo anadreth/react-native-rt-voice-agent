@@ -11,6 +11,8 @@ export interface UseRealtimeVoiceReturn {
   state: SessionState;
   /** Conversation messages (updated in real-time) */
   messages: ConversationMessage[];
+  /** Current mic volume level (0-1) */
+  currentVolume: number;
   /** Start the voice session */
   start: () => Promise<void>;
   /** Stop the voice session */
@@ -44,6 +46,7 @@ export interface UseRealtimeVoiceReturn {
 export function useRealtimeVoice(config: RealtimeSessionConfig): UseRealtimeVoiceReturn {
   const [state, setState] = useState<SessionState>('idle');
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [currentVolume, setCurrentVolume] = useState(0);
   const sessionRef = useRef<RealtimeSession | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
@@ -60,6 +63,9 @@ export function useRealtimeVoice(config: RealtimeSessionConfig): UseRealtimeVoic
         // Route conversation updates to React state
         if (event.type === 'conversation.updated') {
           setMessages(event.messages);
+        }
+        if (event.type === 'volume.changed') {
+          setCurrentVolume(event.level);
         }
         // Forward to user's callback
         configRef.current.onEvent?.(event);
@@ -80,6 +86,7 @@ export function useRealtimeVoice(config: RealtimeSessionConfig): UseRealtimeVoic
   const stop = useCallback(() => {
     sessionRef.current?.stop();
     setMessages([]);
+    setCurrentVolume(0);
   }, []);
 
   const sendText = useCallback((text: string) => {
@@ -101,6 +108,7 @@ export function useRealtimeVoice(config: RealtimeSessionConfig): UseRealtimeVoic
   return {
     state,
     messages,
+    currentVolume,
     start,
     stop,
     sendText,

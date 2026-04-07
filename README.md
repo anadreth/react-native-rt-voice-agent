@@ -10,6 +10,9 @@ A production-ready React Native SDK for building real-time voice agents with Web
 - **State machine** -- explicit session states (`idle` -> `connected` -> `stopped`)
 - **Event-driven** -- typed events instead of raw state arrays
 - **Provider abstraction** -- start with OpenAI, extend to any backend
+- **Auto-reconnection** -- exponential backoff with configurable attempts
+- **App lifecycle** -- auto-pause on background, auto-resume on foreground
+- **Volume monitoring** -- real-time mic level for UI indicators
 - **Framework-agnostic core** -- use the React hook or the core `RealtimeSession` class directly
 
 ## Installation
@@ -28,7 +31,7 @@ For Expo, follow the [react-native-webrtc Expo setup guide](https://github.com/n
 import { useRealtimeVoice, openAIProvider } from 'react-native-rt-voice-agent';
 
 function VoiceScreen() {
-  const { state, messages, start, stop } = useRealtimeVoice({
+  const { state, messages, currentVolume, start, stop } = useRealtimeVoice({
     voice: 'alloy',
     provider: openAIProvider({
       tokenUrl: 'https://your-backend.com/api/openai-session',
@@ -41,6 +44,7 @@ function VoiceScreen() {
   return (
     <View>
       <Text>Status: {state}</Text>
+      <Text>Volume: {Math.round(currentVolume * 100)}%</Text>
       {messages.map((msg) => (
         <Text key={msg.id}>{msg.role}: {msg.text}</Text>
       ))}
@@ -131,6 +135,7 @@ React hook that returns:
 |---|---|---|
 | `state` | `SessionState` | Current session state |
 | `messages` | `ConversationMessage[]` | Live conversation messages |
+| `currentVolume` | `number` | Mic volume level (0-1) for UI indicators |
 | `start()` | `() => Promise<void>` | Start the voice session |
 | `stop()` | `() => void` | Stop the voice session |
 | `sendText(text)` | `(text: string) => void` | Send a text message |
@@ -139,50 +144,79 @@ React hook that returns:
 
 ### `RealtimeSessionConfig`
 
-| Option | Type | Required | Description |
+| Option | Type | Default | Description |
 |---|---|---|---|
-| `provider` | `RealtimeProvider` | Yes | Provider instance (e.g., `openAIProvider(...)`) |
-| `voice` | `string` | No | Voice ID (default: `'alloy'`) |
-| `tools` | `ToolDefinition[]` | No | Tool definitions with handlers |
-| `onEvent` | `(event: RealtimeEvent) => void` | No | Event callback |
-| `initialMessage` | `string` | No | Text sent when session starts |
-| `sessionConfig` | `object` | No | Modalities, transcription model, max tokens |
-| `audio` | `object` | No | Audio constraints |
-| `logger` | `LoggerInterface` | No | Custom logger |
+| `provider` | `RealtimeProvider` | **required** | Provider instance (e.g., `openAIProvider(...)`) |
+| `voice` | `string` | `'alloy'` | Voice ID |
+| `tools` | `ToolDefinition[]` | `[]` | Tool definitions with handlers |
+| `onEvent` | `(event) => void` | -- | Event callback |
+| `initialMessage` | `string` | -- | Text sent when session starts (triggers response) |
+| `sessionConfig.modalities` | `('text'\|'audio')[]` | `['text','audio']` | Modalities |
+| `sessionConfig.transcriptionModel` | `string` | `'gpt-4o-transcribe'` | Transcription model |
+| `sessionConfig.maxResponseTokens` | `number` | -- | Max response tokens |
+| `audio.constraints` | `object` | `true` | MediaStream audio constraints |
+| `timeout` | `number` | `15000` | Network request timeout (ms) |
+| `maxMessages` | `number` | `200` | Max messages in memory (oldest pruned) |
+| `autoReconnect` | `boolean` | `true` | Auto-reconnect on connection loss |
+| `maxReconnectAttempts` | `number` | `3` | Max reconnection attempts |
+| `logger` | `LoggerInterface` | console | Custom logger |
 
 ### Session States
 
 ```
-idle -> requesting_mic -> authenticating -> connecting -> connected -> stopped
-                                                       \-> error -/
+idle -> requesting_mic -> authenticating -> connecting -> connected
+                                                       \-> reconnecting -> idle (retry)
+                                                       \-> error
+                                                       \-> stopped -> idle (restart)
 ```
 
 ### Events
 
-| Event | Description |
-|---|---|
-| `state.changed` | Session state transition |
-| `user.speech.started` | User started speaking |
-| `user.speech.stopped` | User stopped speaking |
-| `user.transcript.partial` | Partial speech-to-text |
-| `user.transcript.final` | Final transcript |
-| `assistant.delta` | Streaming assistant text |
-| `assistant.done` | Complete assistant response |
-| `tool.called` | Tool invocation started |
-| `tool.result` | Tool execution result |
-| `conversation.updated` | Messages array changed |
-| `error` | Error occurred |
-| `raw` | Raw provider message |
+| Event | Fields | Description |
+|---|---|---|
+| `state.changed` | `state`, `previousState` | Session state transition |
+| `user.speech.started` | -- | User started speaking |
+| `user.speech.stopped` | -- | User stopped speaking |
+| `user.transcript.partial` | `text`, `messageId` | Partial speech-to-text |
+| `user.transcript.final` | `text`, `messageId` | Final transcript |
+| `assistant.delta` | `text`, `messageId` | Streaming assistant text |
+| `assistant.done` | `text`, `messageId` | Complete assistant response |
+| `tool.called` | `name`, `args`, `callId` | Tool invocation started |
+| `tool.result` | `name`, `result`, `callId` | Tool execution result |
+| `conversation.updated` | `messages` | Messages array changed |
+| `volume.changed` | `level` | Mic volume level (0-1) |
+| `error` | `error`, `fatal` | Error occurred |
+| `raw` | `data` | Raw provider message |
 
 ### `openAIProvider(config)`
 
-| Option | Type | Required | Description |
+| Option | Type | Default | Description |
 |---|---|---|---|
-| `tokenUrl` | `string` | Yes | Your backend URL for token exchange |
-| `iceConfigUrl` | `string` | No | ICE server config URL |
-| `model` | `string` | No | Model ID (default: `'gpt-4o-realtime-preview'`) |
-| `tokenExtractor` | `(json) => string` | No | Custom token extraction from response |
-| `tokenBody` | `object` | No | Extra fields for token request body |
+| `tokenUrl` | `string` | **required** | Your backend URL for token exchange |
+| `iceConfigUrl` | `string` | -- | ICE server config URL (falls back to Google STUN) |
+| `model` | `string` | `'gpt-4o-realtime-preview'` | OpenAI model ID |
+| `tokenExtractor` | `(json) => string` | auto-detect | Custom token extraction |
+| `tokenBody` | `object` | -- | Extra fields for token request body |
+| `timeout` | `number` | `15000` | Network request timeout (ms) |
+
+## Behavior
+
+### Reconnection
+When the WebRTC connection drops, the library automatically reconnects with exponential backoff (1s, 2s, 4s... up to 10s). After `maxReconnectAttempts` failures, it transitions to `error` and emits a fatal error event. Disable with `autoReconnect: false`.
+
+### App Lifecycle
+On iOS/Android, backgrounding the app kills the audio session. The library automatically:
+- Stops the connection when the app goes to background
+- Restarts the session when the app returns to foreground (if it was connected)
+
+### Interrupts
+When the user starts speaking while the assistant is responding, the library:
+- Finalizes the current (partial) assistant message
+- Sends `response.cancel` to stop the assistant
+- Creates a new ephemeral user message
+
+### Text-Only Mode
+Set `sessionConfig.modalities: ['text']` to use text-only mode. The library handles both `response.audio_transcript.delta` and `response.text.delta` events.
 
 ## Backend Requirements
 
@@ -229,6 +263,12 @@ const myProvider: RealtimeProvider = {
   buildSessionUpdate(config) { /* session config payload */ },
 };
 ```
+
+## Known Limitations
+
+- **No Web Audio API** -- volume monitoring uses `RTCPeerConnection.getStats()` polling, which may not report `audioLevel` on all react-native-webrtc versions
+- **Single session** -- the hook creates one session per mount; unmount and remount to change provider/voice
+- **No offline support** -- requires active network connection
 
 ## License
 

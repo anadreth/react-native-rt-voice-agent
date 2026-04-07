@@ -4,12 +4,17 @@ import {
   mediaDevices,
 } from 'react-native-webrtc';
 import type {
-  RealtimeProvider,
+  Transport,
+  TransportStartConfig,
+  TransportCallbacks,
   RealtimeSessionConfig,
   LoggerInterface,
-} from './types';
-import { ConnectionError, AuthError } from './errors';
-import { createLogger } from './logger';
+  RTCIceServer,
+  TokenRequestConfig,
+} from '../core/types';
+import { ConnectionError, AuthError } from '../core/errors';
+import { createLogger } from '../core/logger';
+import { VolumeMonitor } from '../core/volume-monitor';
 
 interface DataChannelLike {
   readyState: string;
@@ -21,39 +26,34 @@ interface DataChannelLike {
   onmessage: ((event: { data: string }) => void) | null;
 }
 
-export interface ConnectionCallbacks {
-  onStateTransition: (state: 'requesting_mic' | 'authenticating' | 'connecting' | 'connected' | 'error' | 'stopped') => void;
-  onDataChannelMessage: (data: unknown) => void;
-  onDataChannelOpen: () => void;
-  onConnectionLost: () => void;
+export interface WebRTCTransportConfig {
+  /** Fetch an ephemeral auth token */
+  getToken: (config: TokenRequestConfig) => Promise<string>;
+  /** Return ICE server configuration */
+  getIceServers: () => Promise<RTCIceServer[]>;
+  /** Get the realtime SDP endpoint URL */
+  getRealtimeEndpoint: (voice: string) => string;
 }
 
 /**
- * Manages WebRTC peer connection, audio stream, and data channel.
- * Provider-injected — no hardcoded URLs or API assumptions.
+ * WebRTC transport implementation.
+ * Manages peer connection, audio stream, and data channel.
  */
-export class ConnectionManager {
+export class WebRTCTransport implements Transport {
   private peerConnection: RTCPeerConnection | null = null;
   private dataChannel: DataChannelLike | null = null;
   private audioStream: MediaStream | null = null;
-  private provider: RealtimeProvider;
   private logger: LoggerInterface;
-  private callbacks: ConnectionCallbacks;
-  private config: RealtimeSessionConfig;
+  private callbacks: TransportCallbacks | null = null;
+  private config: RealtimeSessionConfig | null = null;
+  private volumeMonitor: VolumeMonitor | null = null;
+  private transportConfig: WebRTCTransportConfig;
 
-  constructor(
-    config: RealtimeSessionConfig,
-    callbacks: ConnectionCallbacks,
-  ) {
-    this.provider = config.provider;
-    this.config = config;
-    this.logger = createLogger(config.logger);
-    this.callbacks = callbacks;
+  constructor(transportConfig: WebRTCTransportConfig, logger?: LoggerInterface) {
+    this.transportConfig = transportConfig;
+    this.logger = createLogger(logger);
   }
 
-  /**
-   * Send a JSON message through the data channel.
-   */
   sendMessage(message: unknown): void {
     if (!this.dataChannel) {
       this.logger.error('Cannot send message: Data channel not initialized');
@@ -70,12 +70,12 @@ export class ConnectionManager {
     }
   }
 
-  /**
-   * Full connection lifecycle: mic → token → peer connection → data channel → SDP exchange.
-   */
-  async start(): Promise<void> {
+  async start(startConfig: TransportStartConfig): Promise<void> {
+    this.callbacks = startConfig.callbacks;
+    this.config = startConfig.sessionConfig;
+
     // Step 1: Request microphone access
-    this.callbacks.onStateTransition('requesting_mic');
+    this.callbacks.onStateChange('requesting_mic');
     this.logger.info('Requesting microphone access');
 
     try {
@@ -90,12 +90,12 @@ export class ConnectionManager {
     }
 
     // Step 2: Fetch authentication token
-    this.callbacks.onStateTransition('authenticating');
+    this.callbacks.onStateChange('authenticating');
     this.logger.info('Fetching session token');
 
     let token: string;
     try {
-      token = await this.provider.getToken({
+      token = await this.transportConfig.getToken({
         voice: this.config.voice ?? 'alloy',
       });
       this.logger.info('Token retrieved');
@@ -105,10 +105,10 @@ export class ConnectionManager {
     }
 
     // Step 3: Create peer connection
-    this.callbacks.onStateTransition('connecting');
+    this.callbacks.onStateChange('connecting');
     this.logger.info('Creating RTCPeerConnection');
 
-    const iceServers = await this.provider.getIceServers();
+    const iceServers = await this.transportConfig.getIceServers();
     const pc = new RTCPeerConnection({ iceServers } as any);
     this.peerConnection = pc;
 
@@ -121,14 +121,24 @@ export class ConnectionManager {
     // Step 5: SDP offer/answer exchange
     await this.performOfferAnswer(pc, token);
 
+    // Step 6: Start volume monitoring if callback provided
+    if (this.callbacks.onVolume) {
+      this.volumeMonitor = new VolumeMonitor(
+        this.callbacks.onVolume,
+        100,
+        this.logger,
+      );
+      this.volumeMonitor.start(pc);
+    }
+
     this.logger.info('WebRTC session established');
   }
 
-  /**
-   * Stop session and clean up all resources.
-   */
   stop(): void {
     this.logger.info('Stopping WebRTC session');
+
+    this.volumeMonitor?.stop();
+    this.volumeMonitor = null;
 
     try {
       if (this.dataChannel) {
@@ -157,15 +167,16 @@ export class ConnectionManager {
       this.logger.error('Error stopping audio tracks', e);
     }
 
+    this.callbacks = null;
+    this.config = null;
     this.logger.info('Session cleanup complete');
   }
 
-  isDataChannelOpen(): boolean {
+  isReady(): boolean {
     return this.dataChannel?.readyState === 'open';
   }
 
   private setupPeerConnectionHandlers(pc: RTCPeerConnection): void {
-    // react-native-webrtc uses addEventListener for these events
     pc.addEventListener('iceconnectionstatechange' as any, () => {
       this.logger.info(`ICE connection state: ${pc.iceConnectionState}`);
       if (
@@ -173,7 +184,7 @@ export class ConnectionManager {
         pc.iceConnectionState === 'failed'
       ) {
         this.logger.error('WebRTC connection failed or disconnected');
-        this.callbacks.onConnectionLost();
+        this.callbacks?.onConnectionLost();
       }
     });
 
@@ -201,25 +212,39 @@ export class ConnectionManager {
       this.logger.info('Data channel opened, sending session config');
       try {
         // Send session.update from provider
-        const sessionUpdate = this.provider.buildSessionUpdate(this.config);
+        const sessionUpdate = this.config!.provider.buildSessionUpdate(this.config!);
         dc.send(JSON.stringify(sessionUpdate));
 
         // Send initial message if provided
-        if (this.config.initialMessage) {
-          dc.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'message',
-              role: 'user',
-              content: [{ type: 'input_text', text: this.config.initialMessage }],
-            },
-          }));
+        if (this.config!.initialMessage) {
+          const provider = this.config!.provider;
+          if (provider.buildUserTextMessages) {
+            const messages = provider.buildUserTextMessages(this.config!.initialMessage);
+            for (const msg of messages) {
+              dc.send(JSON.stringify(msg));
+            }
+          } else {
+            // Fallback to OpenAI-compatible format
+            dc.send(JSON.stringify({
+              type: 'conversation.item.create',
+              item: {
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_text', text: this.config!.initialMessage }],
+              },
+            }));
+            dc.send(JSON.stringify({ type: 'response.create' }));
+          }
         }
 
-        this.callbacks.onDataChannelOpen();
-        this.callbacks.onStateTransition('connected');
+        this.callbacks?.onReady();
+        this.callbacks?.onStateChange('connected');
       } catch (err) {
         this.logger.error('Failed to send initial config', err);
+        this.callbacks?.onError(
+          err instanceof Error ? err : new Error(String(err)),
+          true,
+        );
       }
     };
 
@@ -234,7 +259,7 @@ export class ConnectionManager {
     dc.onmessage = (event: { data: string }) => {
       try {
         const parsed = JSON.parse(event.data);
-        this.callbacks.onDataChannelMessage(parsed);
+        this.callbacks?.onMessage(parsed);
       } catch (err) {
         this.logger.error('Failed to parse data channel message', err);
       }
@@ -250,17 +275,27 @@ export class ConnectionManager {
     const offer = await pc.createOffer({ offerToReceiveAudio: true } as any);
     await pc.setLocalDescription(offer);
 
-    const voice = this.config.voice ?? 'alloy';
-    const endpoint = this.provider.getRealtimeEndpoint(voice);
+    const voice = this.config?.voice ?? 'alloy';
+    const endpoint = this.transportConfig.getRealtimeEndpoint(voice);
 
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/sdp',
-      },
-      body: offer.sdp,
-    });
+    const timeoutMs = this.config?.timeout ?? 15_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let resp: Response;
+    try {
+      resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/sdp',
+        },
+        body: offer.sdp,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!resp.ok) {
       const errorText = await resp.text();

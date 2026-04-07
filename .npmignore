@@ -1,0 +1,11 @@
+src/
+examples/
+lib/
+services/
+*.ts
+!dist/**/*.d.ts
+tsconfig.json
+tsconfig.build.json
+.gitignore
+.claude/
+node_modules/

@@ -7,11 +7,11 @@ import { SessionError } from './errors';
  */
 const TRANSITIONS: Record<SessionState, SessionState[]> = {
   idle:           ['requesting_mic'],
-  requesting_mic: ['authenticating', 'error', 'stopped'],
+  requesting_mic: ['authenticating', 'connecting', 'error', 'stopped'],
   authenticating: ['connecting', 'error', 'stopped'],
   connecting:     ['connected', 'error', 'stopped'],
   connected:      ['reconnecting', 'error', 'stopped'],
-  reconnecting:   ['connecting', 'error', 'stopped'],
+  reconnecting:   ['idle', 'connecting', 'error', 'stopped'],
   error:          ['idle'],
   stopped:        ['idle'],
 };
