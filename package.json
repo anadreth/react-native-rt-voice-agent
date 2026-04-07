@@ -1,0 +1,39 @@
+{
+  "name": "react-native-rt-voice-agent",
+  "version": "0.1.0",
+  "description": "Production-ready React Native Realtime Voice SDK for building voice agents with WebRTC",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "react-native",
+    "webrtc",
+    "voice",
+    "realtime",
+    "openai",
+    "voice-agent",
+    "speech-to-speech"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-native": ">=0.72.0",
+    "react-native-webrtc": ">=118.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/react": "^18.0.0",
+    "react": "^18.0.0",
+    "react-native": "^0.74.0",
+    "react-native-webrtc": "^124.0.0"
+  }
+}
