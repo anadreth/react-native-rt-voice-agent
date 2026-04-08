@@ -1,60 +1,14 @@
 {
-  "name": "react-native-rt-voice-agent",
-  "version": "0.1.0",
-  "description": "Production-ready React Native Realtime Voice SDK for building voice agents with WebRTC and local AI",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "require": "./dist/index.js",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
-    }
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
+  "name": "rtva-workspace",
+  "private": true,
+  "version": "0.2.0-beta.1",
+  "workspaces": [
+    "packages/*"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "npm run build",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run"
-  },
-  "keywords": [
-    "react-native",
-    "webrtc",
-    "voice",
-    "realtime",
-    "openai",
-    "voice-agent",
-    "speech-to-speech",
-    "local-ai",
-    "ollama",
-    "pipecat",
-    "websocket"
-  ],
-  "license": "MIT",
-  "peerDependencies": {
-    "react": ">=18.0.0",
-    "react-native": ">=0.72.0",
-    "react-native-webrtc": ">=118.0.0",
-    "react-native-live-audio-stream": ">=1.0.0",
-    "expo-av": ">=14.0.0"
-  },
-  "peerDependenciesMeta": {
-    "react-native-webrtc": {
-      "optional": true
-    },
-    "react-native-live-audio-stream": {
-      "optional": true
-    },
-    "expo-av": {
-      "optional": true
-    }
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",

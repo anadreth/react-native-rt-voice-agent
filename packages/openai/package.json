@@ -1,0 +1,31 @@
+{
+  "name": "@rtva/openai",
+  "version": "0.2.0-beta.1",
+  "description": "OpenAI backend for RTVA core",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run -c vitest.config.ts"
+  },
+  "dependencies": {
+    "@rtva/core": "0.2.0-beta.1"
+  },
+  "peerDependencies": {
+    "react-native-webrtc": ">=118.0.0"
+  },
+  "license": "MIT"
+}

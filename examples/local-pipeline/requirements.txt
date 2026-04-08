@@ -1,3 +1,0 @@
-pipecat-ai[websocket,silero,whisper,piper]==0.0.108
-faster-whisper==1.2.1
-piper-tts==1.4.2
